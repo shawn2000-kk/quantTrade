@@ -64,6 +64,8 @@ quantTrade/
 │   ├── prod.yaml                   # 生产环境配置
 │   └── backtest.yaml               # 回测配置
 ├── src/
+│   ├── common/                     # 跨层共享类型（所有模块的最底层依赖）
+│   │   └── types.hpp               # Price/Qty/Timestamp typedef + 所有枚举定义
 │   ├── infra/                      # 基础设施层
 │   │   ├── cpu_affinity.hpp/cpp    # CPU 绑核，隔离核心
 │   │   ├── huge_pages.hpp/cpp      # 大页内存（2MB / 1GB）
@@ -74,7 +76,7 @@ quantTrade/
 │   │   ├── rdtsc_clock.hpp         # TSC 高精度时钟（纳秒）
 │   │   └── logger.hpp/cpp          # 异步无锁日志（spdlog）
 │   ├── market_data/                # 行情处理层
-│   │   ├── market_data_types.hpp   # MarketEvent / PriceLevel 类型定义
+│   │   ├── market_data_types.hpp   # BBOEvent(热路径) / DepthEvent(冷路径) / PriceLevel
 │   │   ├── feed_handler.hpp/cpp    # UDP 组播接收，recvmmsg 批量收包
 │   │   ├── pcap_replayer.hpp/cpp   # PCAP 文件回放（回测 / 调试）
 │   │   ├── order_book.hpp/cpp      # 无锁订单簿，数组存价位
@@ -178,19 +180,34 @@ public:
 - **FeedHandler**：绑定组播 socket；`SO_RCVBUF` 设为 64MB；`recvmmsg` 批量收包（每批最多 64 包）；收到后立即打 TSC 时间戳
 - **OrderBook**：bid/ask 各用 `std::array<PriceLevel, 20>` 预分配；价格用整数表示（避免浮点）；支持 5 档 / 20 档深度
 - **BookBuilder**：快照+增量两阶段同步；序列号连续性校验；乱序缓存最多 100 包，超时触发重新请求快照
-- **Normalizer**：将各交易所原始格式转为统一 `MarketEvent`
+- **Normalizer**：将各交易所原始格式转为统一的 `BBOEvent` / `DepthEvent`
+
+行情事件拆分为两个结构体，热冷路径分离：
 
 ```cpp
 // src/market_data/market_data_types.hpp
-struct alignas(64) MarketEvent {
-    uint64_t  exchange_ts_ns;   // 交易所时间戳
-    uint64_t  local_ts_ns;      // 本地 RDTSC 时间戳
-    uint32_t  instrument_id;    // 标准化品种 ID
-    EventType type;             // TRADE / BBO_UPDATE / DEPTH_UPDATE
-    int64_t   bid_px[5];        // Bid 价格（整数，基点）
-    int64_t   ask_px[5];        // Ask 价格
-    int64_t   bid_qty[5];       // Bid 数量
-    int64_t   ask_qty[5];       // Ask 数量
+
+// 热路径：精确 1 cacheline（64B），走 SPSC 队列触发策略
+// TRADE 事件复用字段：bid_px = 成交价，bid_qty = 成交量
+struct alignas(64) BBOEvent {
+    Timestamp    exchange_ts_ns;   // 交易所时间戳（纳秒）
+    Timestamp    local_ts_ns;      // 本地 RDTSC 时间戳（纳秒）
+    InstrumentId instrument_id;
+    EventType    type;             // TRADE / BBO_UPDATE / DEPTH_UPDATE
+    uint8_t      _pad[3];
+    Price        bid_px;           // BBO: 最优买价；TRADE: 成交价
+    Price        ask_px;           // BBO: 最优卖价；TRADE: 0
+    Qty          bid_qty;          // BBO: 最优买量；TRADE: 成交量
+    Qty          ask_qty;          // BBO: 最优卖量；TRADE: 0
+};  // sizeof == 64 ✓
+
+// 冷路径：完整 5 档深度，不走 SPSC，由 OrderBook 提供引用访问
+struct DepthEvent {
+    Timestamp    ts_ns;
+    InstrumentId instrument_id;
+    uint8_t      bid_levels, ask_levels;
+    PriceLevel   bids[MARKET_DEPTH];   // 5 档买价
+    PriceLevel   asks[MARKET_DEPTH];   // 5 档卖价
 };
 ```
 
@@ -283,19 +300,21 @@ PENDING_NEW ──ACK──► NEW ──部分成交──► PARTIALLY_FILLED 
 
 ```cpp
 // src/oms/order.hpp
-struct alignas(64) Order {
+struct alignas(64) Order {           // sizeof == 64，精确 1 cacheline
     uint64_t    client_order_id;
     uint64_t    exchange_order_id;
     uint32_t    instrument_id;
-    OrderSide   side;
+    Side        side;
     OrderType   type;
     OrderStatus status;
-    int64_t     price;          // 整数价格
-    int64_t     qty;            // 原始数量
-    int64_t     filled_qty;
-    int64_t     remaining_qty;
-    uint64_t    submit_ts_ns;   // 提交时间戳
-    uint64_t    ack_ts_ns;      // 确认时间戳
+    uint8_t     _pad[1];
+    Price       price;               // 整数价格（tick 单位）
+    Qty         qty;                 // 原始报单数量
+    Qty         filled_qty;          // 累计成交数量
+    Timestamp   submit_ts_ns;        // 报单发出时间戳
+    Timestamp   ack_ts_ns;           // 收到 ACK 时间戳
+
+    Qty remaining_qty() const noexcept { return qty - filled_qty; }
 };
 ```
 
@@ -489,6 +508,19 @@ set(HOT_PATH_FLAGS "-O3 -march=native -fno-exceptions -fno-rtti
 
 ---
 
+## 各层验收标准
+
+| 层次 | 测试方式 | 通过标准 |
+|------|---------|---------|
+| 基础设施层 | 单元测试 + bench | SPSC 吞吐 > 100M ops/sec；无数据竞争 |
+| 行情处理层 | PCAP 回放对账 | 重建订单簿与交易所快照完全一致 |
+| OMS + 风控 | mock 事件单元测试 | 所有状态转换路径覆盖；风控拦截准确 |
+| 交易所连接 | UAT/SIT 环境联调 | 报单/ACK/成交回报正常；断线重连正常 |
+| 策略层 | 回测框架 | Sharpe ≥ 目标值；最大回撤可接受 |
+| 端到端 | 全链路延迟 bench | p99 < 10µs |
+
+---
+
 ## 生产部署检查清单
 
 ### 硬件要求
@@ -513,4 +545,8 @@ set(HOT_PATH_FLAGS "-O3 -march=native -fno-exceptions -fno-rtti
 
 ---
 
-*文档版本：v1.0 | 创建时间：2026-05-20*
+*文档版本：v1.2 | 创建时间：2026-05-20 | 最后更新：2026-05-20*
+
+### 变更记录
+- **v1.2**：新增各层验收标准表格
+- **v1.1**：新增 `src/common/types.hpp`；`MarketEvent` 拆分为 `BBOEvent`（热路径，64B）和 `DepthEvent`（冷路径）；`Order.remaining_qty` 改为计算方法
