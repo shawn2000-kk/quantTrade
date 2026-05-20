@@ -1,0 +1,20 @@
+system:
+  mode: production
+  log_level: info
+  log_dir: /var/log/hft
+
+risk:
+  max_notional: 500000        # 生产环境单笔最大名义金额（分，更严格）
+  max_net_qty: 5000           # 最大净持仓（手，更严格）
+  max_order_rate: 500         # 每秒最大报单数
+  daily_loss_limit: -1000000  # 日亏损熔断阈值（分）
+
+market_maker:
+  instrument_id: 1
+  spread_ticks: 4
+  order_qty: 50
+  max_inventory: 500
+
+monitoring:
+  prometheus_port: 9090
+  alert_webhook: "https://hooks.example.com/hft-alerts"

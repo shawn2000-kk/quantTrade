@@ -51,14 +51,62 @@ function(ensure_sources out_var dir_glob placeholder_name)
     set(${out_var} "${_srcs}" PARENT_SCOPE)
 endfunction()
 
+# ── 第三方库：spdlog + yaml-cpp（FetchContent，必须在使用其 target 之前声明）──
+include(FetchContent)
+
+# spdlog v1.14.1：异步日志（hft_infra / hft_logger 层依赖）
+FetchContent_Declare(spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG        v1.15.2
+)
+FetchContent_MakeAvailable(spdlog)
+
+# yaml-cpp 0.8.0：YAML 配置解析（hft_config 层依赖）
+# CMAKE_POLICY_VERSION_MINIMUM：yaml-cpp 0.8.0 仍用 cmake_minimum_required(2.8.12)，
+# 在 CMake 4.x 中会报错；此变量让 CMake 接受旧项目声明的低版本。
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+FetchContent_Declare(yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG        0.8.0
+)
+set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(yaml-cpp)
+
 # ── hft_infra 静态库 ──────────────────────────────────────────────
-# 收录 src/infra/ 下所有 .cpp（现阶段可能为空，由 ensure_sources 生成占位文件）
+# 收录 src/infra/ 下所有 .cpp；config_loader.cpp 专属 hft_config，从此处排除
 ensure_sources(INFRA_SOURCES "${CMAKE_SOURCE_DIR}/src/infra/*.cpp" "infra")
+# config_loader.cpp 单独编入 hft_config，避免链接时符号重复
+list(REMOVE_ITEM INFRA_SOURCES "${CMAKE_SOURCE_DIR}/src/infra/config_loader.cpp")
+if(NOT INFRA_SOURCES)
+    set(_infra_ph "${CMAKE_BINARY_DIR}/generated/infra_placeholder.cpp")
+    if(NOT EXISTS "${_infra_ph}")
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
+        file(WRITE "${_infra_ph}" "// Auto-generated placeholder\n")
+    endif()
+    list(APPEND INFRA_SOURCES "${_infra_ph}")
+endif()
 add_library(hft_infra STATIC ${INFRA_SOURCES})
 target_include_directories(hft_infra
     PUBLIC  "${CMAKE_SOURCE_DIR}/src"    # 使 #include "infra/..." 等路径均可用
 )
-target_link_libraries(hft_infra PUBLIC hft_common_flags)
+target_link_libraries(hft_infra
+    PUBLIC  hft_common_flags
+            spdlog::spdlog
+)
+
+# ── hft_config 静态库 ─────────────────────────────────────────────
+# 配置加载器：依赖 yaml-cpp，需要异常支持（不链接 hft_hot_flags）
+add_library(hft_config STATIC
+    "${CMAKE_SOURCE_DIR}/src/infra/config_loader.cpp"
+)
+target_include_directories(hft_config
+    PUBLIC  "${CMAKE_SOURCE_DIR}/src"
+)
+target_link_libraries(hft_config
+    PUBLIC  yaml-cpp::yaml-cpp
+            hft_common_flags
+)
 
 # ── hft_market_data 静态库 ────────────────────────────────────────
 ensure_sources(MARKET_DATA_SOURCES "${CMAKE_SOURCE_DIR}/src/market_data/*.cpp" "market_data")
@@ -174,7 +222,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/googletest/CMakeLists.txt")
     )
 else()
     message(STATUS "GoogleTest: third_party/googletest not found, fetching via FetchContent")
-    include(FetchContent)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
@@ -213,6 +260,26 @@ target_link_libraries(backtest_main
             hft_position
             hft_oms
 )
+
+# ── hft_main 可执行文件 ───────────────────────────────────────────
+# 实盘主程序（6 线程）：链接全部 hft_* 业务库
+add_executable(hft_main
+    "${CMAKE_SOURCE_DIR}/src/main.cpp"
+)
+target_link_libraries(hft_main
+    PRIVATE hft_config
+            hft_strategy
+            hft_execution
+            hft_risk
+            hft_oms
+            hft_position
+            hft_monitor
+            hft_connectivity
+            hft_infra
+)
+if(UNIX AND NOT APPLE)
+    target_link_libraries(hft_main PRIVATE pthread)
+endif()
 
 # ── 测试 ──────────────────────────────────────────────────────────
 enable_testing()

@@ -151,5 +151,18 @@ if(TARGET test_monitor)
     target_link_libraries(test_monitor PRIVATE hft_monitor)
 endif()
 
+# ── 配置系统测试：额外链接 hft_config，并注入项目根路径宏 ────────────
+# test_config.cpp 用 HFT_SOURCE_DIR 宏定位 config/dev.yaml
+if(TARGET test_config)
+    target_link_libraries(test_config PRIVATE hft_config)
+    target_compile_definitions(test_config
+        PRIVATE HFT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+endif()
+
+# ── 日志系统测试：hft_infra 已通过 PUBLIC 传递 spdlog，无需额外链接 ──
+# test_logger.cpp 通过 infra/logger.hpp 使用 spdlog 类型；
+# spdlog::spdlog 在 hft_infra PUBLIC 依赖中，自动传递到所有链接 hft_infra 的目标。
+# 此处仅作说明，不需要额外 target_link_libraries 调用。
+
 # ── 子目录（如有 integration/ 测试，在此扩展）────────────────────
 # add_subdirectory(integration)
