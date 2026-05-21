@@ -164,5 +164,5 @@ endif()
 # spdlog::spdlog 在 hft_infra PUBLIC 依赖中，自动传递到所有链接 hft_infra 的目标。
 # 此处仅作说明，不需要额外 target_link_libraries 调用。
 
-# ── 子目录（如有 integration/ 测试，在此扩展）────────────────────
-# add_subdirectory(integration)
+# ── 集成测试子目录 ────────────────────────────────────────────────
+add_subdirectory(integration)

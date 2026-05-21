@@ -1,6 +1,8 @@
 build/
 build-debug/
+build_*/
 *.o
 *.a
 *.d
 .DS_Store
+Testing/
