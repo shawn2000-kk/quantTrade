@@ -26,6 +26,14 @@ struct MarketMakerConfig {
     int64_t  max_inventory{1000};///< 最大净持仓绝对值（手）
 };
 
+// ── 行情接入参数 ──────────────────────────────────────────────────────────
+struct MarketDataConfig {
+    std::string mcast_addr{"239.0.0.1"};  ///< 组播地址
+    uint16_t    mcast_port{9001};         ///< 组播端口
+    std::string iface{};                  ///< 绑定网口名（空=默认路由）
+    std::string pcap_path{};             ///< 回测 PCAP 文件路径（非空时启用回放模式）
+};
+
 // ── 监控参数 ─────────────────────────────────────────────────────────────
 struct MonitoringConfig {
     int         prometheus_port{9090}; ///< Prometheus HTTP exporter 端口
@@ -37,8 +45,9 @@ struct SystemConfig {
     std::string      mode{"development"};      ///< 运行模式：development / production
     std::string      log_level{"debug"};       ///< 日志级别：debug / info / warn / error
     std::string      log_dir{"/tmp/hft_logs"}; ///< 日志文件目录
-    RiskConfig       risk{};
+    RiskConfig        risk{};
     MarketMakerConfig market_maker{};
+    MarketDataConfig  market_data{};
     MonitoringConfig  monitoring{};
 };
 

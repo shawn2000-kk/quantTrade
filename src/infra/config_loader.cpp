@@ -50,6 +50,18 @@ SystemConfig ConfigLoader::load(const std::string& yaml_path) noexcept {
                 cfg.market_maker.max_inventory = mm["max_inventory"].as<int64_t>();
         }
 
+        // ── market_data 节 ────────────────────────────────────
+        if (const auto& md = root["market_data"]) {
+            if (md["mcast_addr"])
+                cfg.market_data.mcast_addr = md["mcast_addr"].as<std::string>();
+            if (md["mcast_port"])
+                cfg.market_data.mcast_port = md["mcast_port"].as<uint16_t>();
+            if (md["iface"])
+                cfg.market_data.iface = md["iface"].as<std::string>();
+            if (md["pcap_path"])
+                cfg.market_data.pcap_path = md["pcap_path"].as<std::string>();
+        }
+
         // ── monitoring 节 ──────────────────────────────────────
         if (const auto& mon = root["monitoring"]) {
             if (mon["prometheus_port"])

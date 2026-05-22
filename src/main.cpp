@@ -3,7 +3,7 @@
 // 代码风格：-fno-exceptions 兼容（无 throw / catch，所有接口均为 noexcept 或内部封装异常）
 //
 // 线程布局：
-//   核心 2 — MarketDataThread  （占位符，预留 FeedHandler 接入点）
+//   核心 2 — MarketDataThread  （FeedHandler UDP 组播 / PcapReplayer 回测）
 //   核心 3 — StrategyThread     （策略队列 → 中继给 OMSThread）
 //   核心 4 — OMSThread          （风控 + OMS + ExecutionEngine）
 //   核心 5 — GatewayThread      （SimGateway Fill 回调 OMS）
@@ -23,6 +23,9 @@
 #include "infra/logger.hpp"
 #include "infra/cpu_affinity.hpp"
 #include "infra/spsc_queue.hpp"
+#include "market_data/feed_handler.hpp"
+#include "market_data/pcap_replayer.hpp"
+#include "market_data/book_builder.hpp"
 #include "risk/circuit_breaker.hpp"
 #include "risk/rate_limiter.hpp"
 #include "risk/position_limits.hpp"
@@ -132,9 +135,42 @@ int main(int argc, char* argv[]) {
 
     // StrategyThread → OMSThread 的中继队列
     hft::SPSCQueue<hft::OrderRequest, 1024> strat_to_oms_queue;
+    // OMSThread → GatewayThread：传递 client_order_id（SimGateway fill 回填用）
+    // SimGateway 每次 send_new_order 同步生成 1 条 fill，需回填正确的 cloid
+    hft::SPSCQueue<uint64_t, 4096> oms_to_gw_cloid;
 
     // 持仓
     hft::PositionManager pos_mgr;
+
+    // 行情接入：实盘用 FeedHandler，回测用 PcapReplayer
+    const bool use_pcap = !cfg.market_data.pcap_path.empty();
+    hft::BookBuilder book_builder;
+
+    std::unique_ptr<hft::FeedHandler>   feed_handler;
+    std::unique_ptr<hft::PcapReplayer>  pcap_replayer;
+
+    if (use_pcap) {
+        pcap_replayer = std::make_unique<hft::PcapReplayer>(
+            cfg.market_data.pcap_path,
+            hft::ExchangeType::INTERNAL,
+            hft::PcapReplayer::Mode::FASTEST);
+        pcap_replayer->set_bbo_callback([&](const hft::BBOEvent& bbo) noexcept {
+            book_builder.on_bbo(bbo);
+            strategy_mgr.dispatch_bbo(bbo);
+        });
+        pcap_replayer->set_depth_callback([&](const hft::DepthEvent& depth) noexcept {
+            book_builder.on_depth(depth);
+        });
+    } else {
+        feed_handler = std::make_unique<hft::FeedHandler>(
+            cfg.market_data.mcast_addr,
+            cfg.market_data.mcast_port,
+            cfg.market_data.iface);
+        feed_handler->set_bbo_callback([&](const hft::BBOEvent& bbo) noexcept {
+            book_builder.on_bbo(bbo);
+            strategy_mgr.dispatch_bbo(bbo);
+        });
+    }
 
     // 监控
     hft::LatencyTracker lat_tracker{"end_to_end", 256};
@@ -154,21 +190,49 @@ int main(int argc, char* argv[]) {
     // ── 8. 启动 6 个线程 ────────────────────────────────────────────────
 
     // ── MarketDataThread（核心 2）───────────────────────────────────────
-    // 占位符：模拟 1ms 周期空循环，预留 feed_bbo(BBOEvent) 接入点。
-    // 未来：hft::FeedHandler / hft::PcapReplayer → strategy_mgr.dispatch_bbo()
+    // 实盘：FeedHandler 绑定 UDP 组播 → 解析 BBOEvent → 回调 strategy_mgr
+    // 回测：PcapReplayer 从 PCAP 文件逐包回放 → 同上回调
     std::thread md_thread([&]() noexcept {
         hft::pin_thread_to_core(2);
-        HFT_LOG_INFO("market_data", "MarketDataThread started (placeholder)");
 
-        while (!g_stop.load(std::memory_order_relaxed)) {
-            // TODO: 接入 FeedHandler，调用 strategy_mgr.dispatch_bbo(bbo)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            md_event_count.fetch_add(1, std::memory_order_relaxed);
+        if (use_pcap) {
+            HFT_LOG_INFO("market_data", "MarketDataThread started (pcap: {})",
+                         cfg.market_data.pcap_path);
+            // stop 信号：g_stop 变为 true 时停止回放
+            // PcapReplayer::replay() 在文件读完后自然退出
+            // 这里注册 g_stop 轮询回调不可行，直接 replay() 等结束
+            if (!pcap_replayer->replay()) {
+                HFT_LOG_ERROR("market_data", "pcap replay failed");
+            }
+            g_stop.store(true, std::memory_order_relaxed);  // 回放结束，通知其他线程退出
+        } else {
+            HFT_LOG_INFO("market_data", "MarketDataThread started (live: {}:{})",
+                         cfg.market_data.mcast_addr, cfg.market_data.mcast_port);
+            if (!feed_handler->open()) {
+                HFT_LOG_ERROR("market_data", "FeedHandler open failed");
+                g_stop.store(true, std::memory_order_relaxed);
+                return;
+            }
+            // run() 阻塞直到 stop() 被调用
+            // g_stop 由 SIGINT/SIGTERM 或其他线程设置
+            auto stopper = std::thread([&]() noexcept {
+                while (!g_stop.load(std::memory_order_relaxed)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                feed_handler->stop();
+            });
+            feed_handler->run();
+            if (stopper.joinable()) stopper.join();
         }
 
-        HFT_LOG_INFO("market_data", "MarketDataThread stopped, ticks={}",
+        md_event_count.store(
+            use_pcap ? pcap_replayer->messages_replayed()
+                     : feed_handler->rx_messages(),
+            std::memory_order_relaxed);
+
+        HFT_LOG_INFO("market_data", "MarketDataThread stopped, msgs={}",
                      md_event_count.load());
-        std::fprintf(stderr, "[MarketDataThread] stopped, ticks=%llu\n",
+        std::fprintf(stderr, "[MarketDataThread] stopped, msgs=%llu\n",
                      static_cast<unsigned long long>(md_event_count.load()));
     });
 
@@ -204,9 +268,21 @@ int main(int argc, char* argv[]) {
         while (!g_stop.load(std::memory_order_relaxed)) {
             if (strat_to_oms_queue.pop(req)) {
                 if (risk.check(req)) {
-                    (void)oms.submit(req);  // 返回 Order*；生产环境可保存用于 cancel
-                    exec_engine.submit(req);
+                    hft::Order* order = oms.submit(req);
+                    exec_engine.submit(req);  // SimGateway 同步生成 1 fill
                     oms_submit_count.fetch_add(1, std::memory_order_relaxed);
+
+                    if (order) {
+                        // 模拟 ACK（PENDING_NEW → NEW）
+                        hft::OrderAck ack{};
+                        ack.client_order_id   = order->client_order_id;
+                        ack.exchange_order_id = order->client_order_id + 9000;
+                        ack.status            = hft::OrderStatus::NEW;
+                        oms.on_ack(ack);
+
+                        // 把 cloid 推给 GatewayThread，由它回填 fill 后交 OMS
+                        oms_to_gw_cloid.push(order->client_order_id);
+                    }
                 }
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -228,10 +304,17 @@ int main(int argc, char* argv[]) {
         HFT_LOG_INFO("gateway", "GatewayThread started (SimGateway mode)");
 
         hft::FillEvent fill;
+        uint64_t       cloid = 0;
         while (!g_stop.load(std::memory_order_relaxed)) {
-            if (sim_gw.pop_fill(fill)) {
-                oms.on_fill(fill);
-                gw_fill_count.fetch_add(1, std::memory_order_relaxed);
+            // OMSThread 先 exec_engine.submit（生成 fill）再 push cloid
+            // 所以 pop cloid 能成功时，fill 一定已在 sim_gw 队列中
+            if (oms_to_gw_cloid.pop(cloid)) {
+                if (sim_gw.pop_fill(fill)) {
+                    fill.client_order_id = cloid;
+                    oms.on_fill(fill);
+                    if (fill.remaining_qty == 0) oms.release(cloid);
+                    gw_fill_count.fetch_add(1, std::memory_order_relaxed);
+                }
             } else {
                 std::this_thread::sleep_for(std::chrono::microseconds(10));
             }

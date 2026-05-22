@@ -19,10 +19,10 @@ TEST(ConfigLoader, LoadDevYaml) {
     EXPECT_EQ(cfg.mode,                 "development");
     EXPECT_EQ(cfg.log_level,            "debug");
     EXPECT_EQ(cfg.log_dir,              "/tmp/hft_logs");
-    EXPECT_EQ(cfg.risk.max_notional,    1000000);
-    EXPECT_EQ(cfg.risk.max_net_qty,     10000);
-    EXPECT_EQ(cfg.risk.max_order_rate,  100);
-    EXPECT_EQ(cfg.risk.daily_loss_limit, -500000);
+    EXPECT_EQ(cfg.risk.max_notional,    2000000000000LL);
+    EXPECT_EQ(cfg.risk.max_net_qty,     100000);
+    EXPECT_EQ(cfg.risk.max_order_rate,  1000);
+    EXPECT_EQ(cfg.risk.daily_loss_limit, -5000000000LL);
     EXPECT_EQ(cfg.market_maker.instrument_id, 1u);
     EXPECT_EQ(cfg.market_maker.spread_ticks,  2);
     EXPECT_EQ(cfg.market_maker.order_qty,     100);

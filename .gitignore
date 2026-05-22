@@ -6,3 +6,19 @@ build_*/
 *.d
 .DS_Store
 Testing/
+
+# IDE / 工具生成
+.cache/
+compile_commands.json
+.clangd/
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志 / 临时文件
+*.log
+/tmp/

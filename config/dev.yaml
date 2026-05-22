@@ -4,16 +4,22 @@ system:
   log_dir: /tmp/hft_logs
 
 risk:
-  max_notional: 1000000       # 单笔最大名义金额（分）
-  max_net_qty: 10000          # 最大净持仓（手）
-  max_order_rate: 100         # 每秒最大报单数
-  daily_loss_limit: -500000   # 日亏损熔断阈值（分）
+  max_notional: 2000000000000 # dev 不限额（BTC@$100k × qty100 = 1e9 ticks，留足余量）
+  max_net_qty: 100000         # 最大净持仓（手）
+  max_order_rate: 1000        # 每秒最大报单数
+  daily_loss_limit: -5000000000 # 日亏损熔断阈值
 
 market_maker:
   instrument_id: 1
   spread_ticks: 2
   order_qty: 100
   max_inventory: 1000
+
+market_data:
+  mcast_addr: "127.0.0.1"   # 本地开发用单播；生产改为 239.x.x.x 组播地址
+  mcast_port: 9001
+  iface: ""                  # 空 = 默认路由（组播模式时生效）
+  pcap_path: ""              # 非空时启用 PCAP 回放模式（优先于实时行情）
 
 monitoring:
   prometheus_port: 9090
