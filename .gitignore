@@ -22,3 +22,7 @@ __pycache__/
 # 日志 / 临时文件
 *.log
 /tmp/
+
+# 账号配置（含密码，禁止提交）
+config/simnow.yaml
+ctp_flow/
