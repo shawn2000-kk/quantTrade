@@ -1,6 +1,5 @@
 #include "backtest/metrics_report.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -27,7 +26,8 @@ double MetricsReport::sharpe_ratio() const noexcept {
     }
     const double std_dev = std::sqrt(sq_sum / static_cast<double>(n - 1));
 
-    if (std_dev < 1e-12) return 0.0; // 避免除以零
+    if (std_dev < 1e-12)
+        return std::copysign(std::numeric_limits<double>::infinity(), mean);
 
     // 年化 Sharpe（假设 252 个交易日）
     return (mean / std_dev) * std::sqrt(252.0);
@@ -42,13 +42,9 @@ double MetricsReport::max_drawdown() const noexcept {
 
     for (int64_t v : daily_pnls_) {
         cumulative += static_cast<double>(v);
-        if (cumulative > peak) {
-            peak = cumulative;
-        }
-        if (peak > 0.0) {
-            const double dd = (peak - cumulative) / peak;
-            if (dd > max_dd) max_dd = dd;
-        }
+        if (cumulative > peak) peak = cumulative;
+        const double dd = peak - cumulative; // 绝对回撤（ticks）
+        if (dd > max_dd) max_dd = dd;
     }
     return max_dd;
 }
